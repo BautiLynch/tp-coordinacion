@@ -18,6 +18,12 @@ class SumFilter:
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
+        self.eof_exchange_send = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, "EOF", ["EOF_SUM"]
+        )
+        self.eof_exchange_recv = middleware.MessageMiddlewareExchangeRabbitMQ(
+                    MOM_HOST, "EOF", ["EOF_SUM"]
+                )
         self.data_output_exchanges = []
         for i in range(AGGREGATION_AMOUNT):
             data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
@@ -25,6 +31,8 @@ class SumFilter:
             )
             self.data_output_exchanges.append(data_output_exchange)
         self.amount_by_fruit_by_client = {}
+        self.threads = []
+        self.ack_by_clients = {}
 
     def _process_data(self, client, fruit, amount):
         logging.info(f"Process data")
@@ -34,32 +42,41 @@ class SumFilter:
         ) + fruit_item.FruitItem(fruit, int(amount))
         self.amount_by_fruit_by_client[client] = amount_by_fruit
 
-    def _process_eof(self, client):
+    def _process_eof(self, client, is_gateway_message):
         logging.info(f"Broadcasting data messages")
+        if is_gateway_message:
+            self.eof_exchange_send.send(message_protocol.internal.serialize([client, False]))
+            return
         amount_by_fruit = self.amount_by_fruit_by_client.get(client, {})
         for final_fruit_item in amount_by_fruit.values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [client, final_fruit_item.fruit, final_fruit_item.amount]
-                    )
-                )
-        logging.info(f"Broadcasting EOF message")
-        for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([client]))
+            self.send_to_agg([client, final_fruit_item.fruit, final_fruit_item.amount])
         if len(self.amount_by_fruit_by_client.get(client, {})) != 0:
             del self.amount_by_fruit_by_client[client]  # TODO: Revisar si esto esta bien asi
-
+        self.send_to_agg([client])
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self._process_data(*fields)
-        else:
+        elif len(fields) == 2:
             self._process_eof(*fields)
+        else:
+            nack()
+            return
         ack()
 
+    def send_to_agg(self, message):
+        for data_output_exchange in self.data_output_exchanges:
+            data_output_exchange.send(
+                message_protocol.internal.serialize(
+                    message
+                )
+            )
+
     def start(self):
+        control_thread = threading.Thread(target=self.eof_exchange_recv.start_consuming, args=(self.process_data_messsage,))
+        control_thread.start()
+        self.threads.append(control_thread)
         self.input_queue.start_consuming(self.process_data_messsage)
 
 def main():
