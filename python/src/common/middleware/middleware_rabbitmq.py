@@ -102,3 +102,13 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareImplementation, Message
             raise MessageMiddlewareDisconnectedError("Error en la conexion") from e
         except Exception as e:
             raise MessageMiddlewareMessageError("Error al enviar mensaje") from e
+
+    def send_rk(self, message, routing_key):
+            try:
+                self.channel.basic_publish(exchange=self.exchange_name,
+                    routing_key=routing_key,
+                    body=message)
+            except pika.exceptions.AMQPConnectionError as e:
+                raise MessageMiddlewareDisconnectedError("Error en la conexion") from e
+            except Exception as e:
+                raise MessageMiddlewareMessageError("Error al enviar mensaje") from e

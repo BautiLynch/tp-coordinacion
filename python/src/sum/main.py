@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import zlib
 
 from common import middleware, message_protocol, fruit_item
 
@@ -12,24 +13,21 @@ SUM_PREFIX = os.environ["SUM_PREFIX"]
 SUM_CONTROL_EXCHANGE = "SUM_CONTROL_EXCHANGE"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
-
+EOF_RK = "EOF_SUM"
 class SumFilter:
     def __init__(self):
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
         self.eof_exchange_send = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, "EOF", ["EOF_SUM"]
+            MOM_HOST, "EOF", []
         )
         self.eof_exchange_recv = middleware.MessageMiddlewareExchangeRabbitMQ(
-                    MOM_HOST, "EOF", ["EOF_SUM"]
+                    MOM_HOST, "EOF", [EOF_RK]
                 )
-        self.data_output_exchanges = []
-        for i in range(AGGREGATION_AMOUNT):
-            data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
-            )
-            self.data_output_exchanges.append(data_output_exchange)
+        self.data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, AGGREGATION_PREFIX, []
+        )
         self.amount_by_fruit_by_client = {}
         self.threads = []
         self.ack_by_clients = {}
@@ -45,14 +43,18 @@ class SumFilter:
     def _process_eof(self, client, is_gateway_message):
         logging.info(f"Broadcasting data messages")
         if is_gateway_message:
-            self.eof_exchange_send.send(message_protocol.internal.serialize([client, False]))
+            self.eof_exchange_send.send_rk(message_protocol.internal.serialize([client, False]), EOF_RK)
             return
         amount_by_fruit = self.amount_by_fruit_by_client.get(client, {})
         for final_fruit_item in amount_by_fruit.values():
-            self.send_to_agg([client, final_fruit_item.fruit, final_fruit_item.amount])
+            key = message_protocol.internal.serialize(
+                [client, final_fruit_item.fruit]
+            )
+            hash = zlib.crc32(key)
+            self.send_to_agg([client, final_fruit_item.fruit, final_fruit_item.amount], hash % AGGREGATION_AMOUNT)
+        self.send_to_all_agg([client])
         if len(self.amount_by_fruit_by_client.get(client, {})) != 0:
-            del self.amount_by_fruit_by_client[client]  # TODO: Revisar si esto esta bien asi
-        self.send_to_agg([client])
+            del self.amount_by_fruit_by_client[client]
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
@@ -64,14 +66,17 @@ class SumFilter:
             nack()
             return
         ack()
-
-    def send_to_agg(self, message):
-        for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(
-                message_protocol.internal.serialize(
-                    message
-                )
-            )
+    def send_to_agg(self, message, id):
+        self.data_output_exchange.send_rk(
+            message_protocol.internal.serialize(
+                message
+            ),
+            f"{AGGREGATION_PREFIX}_{id}"
+        )
+    def send_to_all_agg(self, message):
+        for i in range(AGGREGATION_AMOUNT):
+            self.send_to_agg(message, i)
+            
 
     def start(self):
         control_thread = threading.Thread(target=self.eof_exchange_recv.start_consuming, args=(self.process_data_messsage,))

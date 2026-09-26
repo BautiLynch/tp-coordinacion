@@ -57,7 +57,7 @@ class AggregationFilter:
         message = [client, fruit_top_final]
         self.output_queue.send(message_protocol.internal.serialize(message))
         if len(self.fruit_top_by_client.get(client, [])) != 0:
-            del self.fruit_top_by_client[client]  # TODO: Revisar si esto esta bien asi
+            del self.fruit_top_by_client[client]
         del self.sums_by_client[client]
 
     def process_messsage(self, message, ack, nack):
@@ -65,8 +65,11 @@ class AggregationFilter:
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self._process_data(*fields)
-        else:
+        elif len(fields) == 1:
             self._process_eof(*fields)
+        else:
+            nack()
+            return
         ack()
 
     def start(self):

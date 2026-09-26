@@ -56,6 +56,9 @@ class MessageMiddlewareExchange(MessageMiddleware):
     @abstractmethod
     def __init__(self, host, exchange_name, route_keys):
         pass
+    @abstractmethod
+    def send_rk(self, message, routing_key):
+        pass
 
 
 class MessageMiddlewareQueue(MessageMiddleware):
