@@ -31,41 +31,57 @@ class SumFilter:
         self.amount_by_fruit_by_client = {}
         self.threads = []
         self.ack_by_clients = {}
+        self.data_lock = threading.Lock()
+        self.condvar = threading.Condition()
+        self.current_client = None
 
     def _process_data(self, client, fruit, amount):
         logging.info(f"Process data")
-        amount_by_fruit = self.amount_by_fruit_by_client.get(client, {})
-        amount_by_fruit[fruit] = amount_by_fruit.get(
-            fruit, fruit_item.FruitItem(fruit, 0)
-        ) + fruit_item.FruitItem(fruit, int(amount))
-        self.amount_by_fruit_by_client[client] = amount_by_fruit
+        with self.data_lock:
+            amount_by_fruit = self.amount_by_fruit_by_client.get(client, {})
+            amount_by_fruit[fruit] = amount_by_fruit.get(
+                fruit, fruit_item.FruitItem(fruit, 0)
+            ) + fruit_item.FruitItem(fruit, int(amount))
+            self.amount_by_fruit_by_client[client] = amount_by_fruit
 
     def _process_eof(self, client, is_gateway_message):
         logging.info(f"Broadcasting data messages")
         if is_gateway_message:
             self.eof_exchange_send.send_rk(message_protocol.internal.serialize([client, False]), EOF_RK)
             return
-        amount_by_fruit = self.amount_by_fruit_by_client.get(client, {})
+        amount_by_fruit = {}
+        with self.condvar:
+            while self.current_client == client:
+                self.condvar.wait()
+        with self.data_lock:
+            amount_by_fruit = self.amount_by_fruit_by_client.pop(client, {})
         for final_fruit_item in amount_by_fruit.values():
             key = message_protocol.internal.serialize(
                 [client, final_fruit_item.fruit]
             )
-            hash = zlib.crc32(key)
+            hash = zlib.adler32(key)
             self.send_to_agg([client, final_fruit_item.fruit, final_fruit_item.amount], hash % AGGREGATION_AMOUNT)
         self.send_to_all_agg([client])
-        if len(self.amount_by_fruit_by_client.get(client, {})) != 0:
-            del self.amount_by_fruit_by_client[client]
 
     def process_data_messsage(self, message, ack, nack):
-        fields = message_protocol.internal.deserialize(message)
+        with self.condvar:
+            fields = message_protocol.internal.deserialize(message)
+            if len(fields) == 3:
+                self.current_client = fields[0]
         if len(fields) == 3:
-            self._process_data(*fields)
+            try:
+                self._process_data(*fields)
+            finally:
+                with self.condvar:
+                    self.current_client = None
+                    self.condvar.notify_all()
         elif len(fields) == 2:
             self._process_eof(*fields)
         else:
             nack()
             return
         ack()
+
     def send_to_agg(self, message, id):
         self.data_output_exchange.send_rk(
             message_protocol.internal.serialize(
