@@ -2,6 +2,7 @@ import os
 import logging
 import threading
 import zlib
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -34,6 +35,8 @@ class SumFilter:
         self.data_lock = threading.Lock()
         self.condvar = threading.Condition()
         self.current_client = None
+        self.end_event = threading.Event()
+        signal.signal(signal.SIGTERM, self.sigterm_handler)
 
     def _process_data(self, client, fruit, amount):
         logging.info(f"Process data")
@@ -51,7 +54,7 @@ class SumFilter:
             return
         amount_by_fruit = {}
         with self.condvar:
-            while self.current_client == client:
+            while self.current_client == client and (not self.end_event.is_set()):
                 self.condvar.wait()
         with self.data_lock:
             amount_by_fruit = self.amount_by_fruit_by_client.pop(client, {})
@@ -60,7 +63,11 @@ class SumFilter:
                 [client, final_fruit_item.fruit]
             )
             hash = zlib.adler32(key)
+            if self.end_event.is_set():
+                return
             self.send_to_agg([client, final_fruit_item.fruit, final_fruit_item.amount], hash % AGGREGATION_AMOUNT)
+        if self.end_event.is_set():
+            return
         self.send_to_all_agg([client])
 
     def process_data_messsage(self, message, ack, nack):
@@ -93,13 +100,41 @@ class SumFilter:
         for i in range(AGGREGATION_AMOUNT):
             self.send_to_agg(message, i)
             
+    def sigterm_handler(self, signum, frame):
+        if self.end_event.is_set():
+            return
+        self.end_event.set()
+        try:
+            self.input_queue.stop_consuming()
+        finally:
+            self.eof_exchange_recv.stop_consuming()
 
+    def close(self):
+        for mom in [self.input_queue,self.eof_exchange_send,self.eof_exchange_recv, self.data_output_exchange]:
+            try:
+                mom.close()
+            except Exception as e:
+                logging.error(f"Error closing message middleware: {e}")
+                                    
     def start(self):
         control_thread = threading.Thread(target=self.eof_exchange_recv.start_consuming, args=(self.process_data_messsage,))
-        control_thread.start()
         self.threads.append(control_thread)
-        self.input_queue.start_consuming(self.process_data_messsage)
-
+        try:
+            control_thread.start()
+            self.input_queue.start_consuming(self.process_data_messsage)
+        finally:
+            self.end_event.set()
+            with self.condvar:
+                self.condvar.notify_all()
+            if control_thread.is_alive():
+                try:
+                    self.eof_exchange_recv.stop_consuming()
+                finally:
+                    control_thread.join()
+                    self.close()
+            else:
+                self.close()
+            
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()

@@ -22,7 +22,13 @@ class MessageMiddlewareImplementation:
             
     def stop_consuming(self):
         try:
-            self.channel.stop_consuming()
+            if self.connection is None or self.connection.is_closed:
+                return
+
+            self.connection.add_callback_threadsafe(
+                self.channel.stop_consuming
+            )
+
         except pika.exceptions.AMQPConnectionError as e:
             raise MessageMiddlewareDisconnectedError("Error en la conexion") from e
         except Exception as e:

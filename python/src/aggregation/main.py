@@ -1,6 +1,8 @@
 import os
 import logging
 import bisect
+import signal
+import threading
 
 from common import middleware, message_protocol, fruit_item
 
@@ -25,6 +27,8 @@ class AggregationFilter:
         )
         self.fruit_top_by_client = {}
         self.sums_by_client = {}
+        self.end_event = threading.Event()
+        signal.signal(signal.SIGTERM, self.sigterm_handler)
 
     def _process_data(self, client, fruit, amount):
         logging.info("Processing data message")
@@ -72,9 +76,24 @@ class AggregationFilter:
             return
         ack()
 
-    def start(self):
-        self.input_exchange.start_consuming(self.process_messsage)
+    def sigterm_handler(self, signum, frame):
+        if self.end_event.is_set():
+            return
+        self.end_event.set()
+        self.input_exchange.stop_consuming()
 
+    def close(self):
+        for mom in [self.input_exchange, self.output_queue]:
+            try:
+                mom.close()
+            except Exception as e:
+                logging.error(f"Error closing message middleware: {e}")
+
+    def start(self):
+        try:
+            self.input_exchange.start_consuming(self.process_messsage)
+        finally:
+            self.close()
 
 def main():
     logging.basicConfig(level=logging.INFO)

@@ -1,5 +1,7 @@
 import os
 import logging
+import signal
+import threading
 
 from common import middleware, message_protocol, fruit_item
 
@@ -24,6 +26,8 @@ class JoinFilter:
         )
         self.agg_by_client = {}
         self.total_by_client = {}
+        self.end_event = threading.Event()
+        signal.signal(signal.SIGTERM, self.sigterm_handler)
 
     def _process_data(self, client, fruit_top_final):
         new_fruits = []
@@ -58,11 +62,25 @@ class JoinFilter:
             nack()
             return
         ack()
+
+    def sigterm_handler(self, signum, frame):
+        if self.end_event.is_set():
+            return
+        self.end_event.set()
+        self.input_queue.stop_consuming()
         
-
+    def close(self):
+        for mom in [self.input_queue, self.output_queue]:
+            try:
+                mom.close()
+            except Exception as e:
+                logging.error(f"Error closing message middleware: {e}")
+    
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
-
+        try:
+            self.input_queue.start_consuming(self.process_messsage)
+        finally:
+            self.close()
 
 def main():
     logging.basicConfig(level=logging.INFO)
